@@ -1,6 +1,3 @@
-#export GOPATH := $(shell pwd):$(GOPATH)
-#export PATH := $(GOPATH)/bin:$(PATH)
-
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 SIDECAR_IMG ?= sidecar:latest

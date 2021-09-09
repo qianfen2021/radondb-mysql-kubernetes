@@ -18,7 +18,11 @@ package e2e
 
 import (
 	"flag"
+	"fmt"
+	"os"
 	"testing"
+
+	"k8s.io/component-base/version"
 
 	"github.com/radondb/radondb-mysql-kubernetes/test/e2e/framework"
 	"github.com/radondb/radondb-mysql-kubernetes/test/e2e/framework/config"
@@ -38,7 +42,7 @@ var viperConfig = flag.String("viper-config", "", "The name of a viper config fi
 func handleFlags() {
 	config.CopyFlags(config.Flags, flag.CommandLine)
 	framework.RegisterCommonFlags(flag.CommandLine)
-	framework.RegisterClusterFlags(flag.CommandLine)
+	// framework.RegisterClusterFlags(flag.CommandLine)
 	flag.Parse()
 }
 
@@ -52,9 +56,14 @@ func TestMain(m *testing.M) {
 	// Now that we know which Viper config (if any) was chosen,
 	// parse it and update those options which weren't already set via command line flags
 	// (which have higher priority).
-	if err := viperizeFlags(*viperConfig, "e2e", flag.CommandLine); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	//if err := viperizeFlags(*viperConfig, "e2e", flag.CommandLine); err != nil {
+	//	fmt.Fprintln(os.Stderr, err)
+	//	os.Exit(1)
+	//}
+
+	if versionFlag {
+		fmt.Printf("%s\n", version.Get())
+		os.Exit(0)
 	}
 }
 
