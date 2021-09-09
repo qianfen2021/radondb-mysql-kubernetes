@@ -1,3 +1,5 @@
+#export GOPATH := $(shell pwd):$(GOPATH)
+#export PATH := $(GOPATH)/bin:$(PATH)
 
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
@@ -113,3 +115,16 @@ GOBIN=$(PROJECT_DIR)/bin go get $(2) ;\
 rm -rf $$TMP_DIR ;\
 }
 endef
+
+# E2E tests
+###########
+
+KUBECONFIG ?= ~/.kube/config
+K8S_CONTEXT ?= minikube
+	#go test ./test/e2e -v $(G_ARGS) -timeout 20m --pod-wait-timeout 60 \
+                #-ginkgo.slowSpecThreshold 300 \
+                #--kubernetes-config $(KUBECONFIG) --kubernetes-context $(K8S_CONTEXT) \
+                #--report-dir ../../e2e-reports
+
+e2e-local:
+	go test ./test/e2e -v $(G_ARGS) -timeout 20m
