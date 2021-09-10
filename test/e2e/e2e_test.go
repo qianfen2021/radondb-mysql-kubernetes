@@ -19,10 +19,13 @@ package e2e
 import (
 	"flag"
 	"fmt"
+	"math/rand"
 	"os"
 	"testing"
+	"time"
 
 	"k8s.io/component-base/version"
+	"k8s.io/kubernetes/test/utils/image"
 
 	"github.com/radondb/radondb-mysql-kubernetes/test/e2e/framework"
 	"github.com/radondb/radondb-mysql-kubernetes/test/e2e/framework/config"
@@ -47,26 +50,30 @@ func handleFlags() {
 }
 
 func TestMain(m *testing.M) {
+	fmt.Println("gry----test main")
 	var versionFlag bool
 	flag.CommandLine.BoolVar(&versionFlag, "version", false, "Displays version information.")
 
 	// Register test flags, then parse flags.
 	handleFlags()
 
-	// Now that we know which Viper config (if any) was chosen,
-	// parse it and update those options which weren't already set via command line flags
-	// (which have higher priority).
-	//if err := viperizeFlags(*viperConfig, "e2e", flag.CommandLine); err != nil {
-	//	fmt.Fprintln(os.Stderr, err)
-	//	os.Exit(1)
-	//}
+	if framework.TestContext.ListImages {
+		for _, v := range image.GetImageConfigs() {
+			fmt.Println(v.GetE2EImage())
+		}
+		os.Exit(0)
+	}
 
 	if versionFlag {
 		fmt.Printf("%s\n", version.Get())
 		os.Exit(0)
 	}
+
+	rand.Seed(time.Now().UnixNano())
+	os.Exit(m.Run())
 }
 
 func TestE2E(t *testing.T) {
+	fmt.Println("gry----test e2e")
 	RunE2ETests(t)
 }

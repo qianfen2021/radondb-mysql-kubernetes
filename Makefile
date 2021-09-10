@@ -124,4 +124,4 @@ K8S_CONTEXT ?= minikube
                 #--report-dir ../../e2e-reports
 
 e2e-local:
-	go test ./test/e2e -v $(G_ARGS) -timeout 20m
+	go test -v ./test/e2e  $(G_ARGS) -timeout 20m
