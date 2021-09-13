@@ -31,14 +31,6 @@ import (
 	"github.com/radondb/radondb-mysql-kubernetes/test/e2e/framework/config"
 )
 
-/*
-func init() {
-	// framework.ViperizeFlags()
-	testing.Init()
-	framework.RegisterParseFlags()
-}
-*/
-
 var viperConfig = flag.String("viper-config", "", "The name of a viper config file (https://github.com/spf13/viper#what-is-viper). All e2e command line parameters can also be configured in such a file. May contain a path and may or may not contain the file suffix. The default is to look for an optional file with `e2e` as base name. If a file is specified explicitly, it must be present.")
 
 // handleFlags sets up all flags and parses the command line.
@@ -50,7 +42,6 @@ func handleFlags() {
 }
 
 func TestMain(m *testing.M) {
-	fmt.Println("gry----test main")
 	var versionFlag bool
 	flag.CommandLine.BoolVar(&versionFlag, "version", false, "Displays version information.")
 
