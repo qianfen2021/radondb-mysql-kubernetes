@@ -32,7 +32,7 @@ import (
 	//
 	//	corev1 "k8s.io/api/core/v1"
 	//	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	//	runtimeutils "k8s.io/apimachinery/pkg/util/runtime"
+	runtimeutils "k8s.io/apimachinery/pkg/util/runtime"
 	//	clientset "k8s.io/client-go/kubernetes"
 	//	core "k8s.io/client-go/kubernetes/typed/core/v1"
 	//	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
@@ -140,8 +140,8 @@ var _ = ginkgo.SynchronizedAfterSuite(func() {
 // This function is called on each Ginkgo node in parallel mode.
 func RunE2ETests(t *testing.T) {
 	fmt.Println("gry----test")
+	runtimeutils.ReallyCrash = true
 	/*
-		runtimeutils.ReallyCrash = true
 
 		gomega.RegisterFailHandler(ginkgowrapper.Fail)
 		// Disable skipped tests unless they are explicitly requested.
