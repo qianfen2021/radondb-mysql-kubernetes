@@ -118,10 +118,9 @@ endef
 
 KUBECONFIG ?= ~/.kube/config
 K8S_CONTEXT ?= minikube
-	#go test ./test/e2e -v $(G_ARGS) -timeout 20m --pod-wait-timeout 60 \
-                #-ginkgo.slowSpecThreshold 300 \
-                #--kubernetes-config $(KUBECONFIG) --kubernetes-context $(K8S_CONTEXT) \
-                #--report-dir ../../e2e-reports
 
 e2e-local:
-	go test -v ./test/e2e  $(G_ARGS) -timeout 20m
+	go test -v ./test/e2e  $(G_ARGS) -timeout 20m \
+                -ginkgo.slowSpecThreshold 300 \
+                --kubeconfig $(KUBECONFIG) --context $(K8S_CONTEXT) \
+                --report-dir ../../e2e-reports
