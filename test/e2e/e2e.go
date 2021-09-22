@@ -17,10 +17,12 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path"
 	"testing"
+	"time"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/config"
@@ -30,6 +32,7 @@ import (
 	"github.com/radondb/radondb-mysql-kubernetes/test/e2e/framework/ginkgowrapper"
 	e2ereporters "github.com/radondb/radondb-mysql-kubernetes/test/e2e/reporters"
 
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtimeutils "k8s.io/apimachinery/pkg/util/runtime"
 	clientset "k8s.io/client-go/kubernetes"

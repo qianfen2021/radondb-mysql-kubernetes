@@ -17,15 +17,8 @@ limitations under the License.
 package e2e
 
 import (
-	"fmt"
-	"io/ioutil"
-	"path"
-	"time"
-
-	clientset "k8s.io/client-go/kubernetes"
-
 	"github.com/radondb/radondb-mysql-kubernetes/test/e2e/framework"
-	e2emetrics "github.com/radondb/radondb-mysql-kubernetes/test/e2e/framework/metrics"
+	//e2emetrics "github.com/radondb/radondb-mysql-kubernetes/test/e2e/framework/metrics"
 )
 
 // CleanupSuite is the boilerplate that can be used after tests on ginkgo were run, on the SynchronizedAfterSuite step.
@@ -43,12 +36,15 @@ func AfterSuiteActions() {
 	// Run only Ginkgo on node 1
 	framework.Logf("Running AfterSuite actions on node 1")
 	if framework.TestContext.GatherSuiteMetricsAfterTest {
-		if err := gatherTestSuiteMetrics(); err != nil {
-			framework.Logf("Error gathering metrics: %v", err)
+		// if err := gatherTestSuiteMetrics(); err != nil {
+		if true {
+			// framework.Logf("Error gathering metrics: %v", err)
+			framework.Logf("Error gathering metrics")
 		}
 	}
 }
 
+/*
 func gatherTestSuiteMetrics() error {
 	framework.Logf("Gathering metrics")
 	config, err := framework.LoadConfig()
@@ -84,3 +80,4 @@ func gatherTestSuiteMetrics() error {
 
 	return nil
 }
+*/
