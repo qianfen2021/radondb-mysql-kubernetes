@@ -17,7 +17,9 @@ limitations under the License.
 package internal
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -25,7 +27,11 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	apiv1alpha1 "github.com/radondb/radondb-mysql-kubernetes/api/v1alpha1"
+	"github.com/radondb/radondb-mysql-kubernetes/mysqlcluster"
 	"github.com/radondb/radondb-mysql-kubernetes/utils"
 )
 
@@ -38,36 +44,142 @@ var errorConnectionStates = []string{
 	"waiting to reconnect after a failed master event read",
 }
 
-// SQLRunner is a runner for run the sql.
-type SQLRunner struct {
+var internalLog = log.Log.WithName("mysql-internal")
+
+// Config is used to connect to a MysqlCluster.
+type Config struct {
+	User     string
+	Password string
+	Host     string
+	Port     int32
+}
+
+// NewConfigFromClusterKey returns a new Config based on a MySQLCluster key.
+func NewConfigFromClusterKey(c client.Client, clusterKey client.ObjectKey, userName, host string) (*Config, error) {
+	cluster := &apiv1alpha1.MysqlCluster{}
+	if err := c.Get(context.TODO(), clusterKey, cluster); err != nil {
+		return nil, err
+	}
+
+	secret := &corev1.Secret{}
+	secretKey := client.ObjectKey{Name: mysqlcluster.New(cluster).GetNameForResource(utils.Secret), Namespace: cluster.Namespace}
+
+	if err := c.Get(context.TODO(), secretKey, secret); err != nil {
+		return nil, err
+	}
+
+	if host == utils.LeaderHost {
+		host = fmt.Sprintf("%s-leader.%s", cluster.Name, cluster.Namespace)
+	}
+
+	switch userName {
+	case utils.OperatorUser:
+		password, ok := secret.Data["operator-password"]
+		if !ok {
+			return nil, fmt.Errorf("operator-password cannot be empty")
+		}
+		return &Config{
+			User:     utils.OperatorUser,
+			Password: string(password),
+			Host:     host,
+			Port:     utils.MysqlPort,
+		}, nil
+
+	case utils.RootUser:
+		password, ok := secret.Data["internal-root-password"]
+		if !ok {
+			return nil, fmt.Errorf("internal-root-password cannot be empty")
+		}
+		return &Config{
+			User:     utils.RootUser,
+			Password: string(password),
+			Host:     host,
+			Port:     utils.MysqlPort,
+		}, nil
+	default:
+		return nil, fmt.Errorf("MySQL user %s are not supported", userName)
+	}
+
+}
+
+// GetMysqlDSN returns a data source name.
+func (c *Config) GetMysqlDSN() string {
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/?timeout=5s&multiStatements=true&interpolateParams=true",
+		c.User, c.Password, c.Host, c.Port,
+	)
+}
+
+type sqlRunner struct {
 	db *sql.DB
 }
 
-// NewSQLRunner return a pointer to SQLRunner.
-func NewSQLRunner(user, password, host string, port int) (*SQLRunner, error) {
-	dataSourceName := fmt.Sprintf("%s:%s@tcp(%s:%d)/?timeout=5s&interpolateParams=true&multiStatements=true",
-		user, password, host, port,
-	)
-	db, err := sql.Open("mysql", dataSourceName)
+// SQLRunner interface is a subset of mysql.DB.
+type SQLRunner interface {
+	QueryExec(query Query) error
+	QueryRow(query Query, dest ...interface{}) error
+	QueryRows(query Query) (*sql.Rows, error)
+}
+
+type closeFunc func()
+
+// SQLRunnerFactory a function that generates a new SQLRunner.
+type SQLRunnerFactory func(cfg *Config, errs ...error) (SQLRunner, closeFunc, error)
+
+// NewSQLRunner opens a connections using the given DSN.
+func NewSQLRunner(cfg *Config, errs ...error) (SQLRunner, closeFunc, error) {
+	var db *sql.DB
+	var close closeFunc = nil
+
+	// Make this factory accept a functions that tries to generate a config.
+	if len(errs) > 0 && errs[0] != nil {
+		return nil, close, errs[0]
+	}
+
+	db, err := sql.Open("mysql", cfg.GetMysqlDSN())
+	if err != nil {
+		return nil, close, err
+	}
+
+	// Close connection function.
+	close = func() {
+		if cErr := db.Close(); cErr != nil {
+			internalLog.Error(cErr, "failed closing the database connection")
+		}
+	}
+
+	return &sqlRunner{db: db}, close, nil
+}
+
+// QueryExec used to run the query with args.
+func (s sqlRunner) QueryExec(query Query) error {
+	if _, err := s.db.Exec(query.String(), query.args...); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s sqlRunner) QueryRow(query Query, dest ...interface{}) error {
+	return s.db.QueryRow(query.escapedQuery, query.args...).Scan(dest...)
+}
+
+func (s sqlRunner) QueryRows(query Query) (*sql.Rows, error) {
+	rows, err := s.db.Query(query.escapedQuery, query.args...)
 	if err != nil {
 		return nil, err
 	}
 
-	if err = db.Ping(); err != nil {
-		return nil, err
-	}
-
-	return &SQLRunner{db}, nil
+	return rows, rows.Err()
 }
 
 // CheckSlaveStatusWithRetry check the slave status with retry time.
-func (s *SQLRunner) CheckSlaveStatusWithRetry(retry uint32) (isLagged, isReplicating corev1.ConditionStatus, err error) {
+func CheckSlaveStatusWithRetry(sqlRunner SQLRunner, retry uint32) (isLagged, isReplicating corev1.ConditionStatus, err error) {
 	for {
 		if retry == 0 {
 			break
 		}
 
-		if isLagged, isReplicating, err = s.checkSlaveStatus(); err == nil {
+		if isLagged, isReplicating, err = checkSlaveStatus(sqlRunner); err == nil {
 			return
 		}
 
@@ -79,10 +191,10 @@ func (s *SQLRunner) CheckSlaveStatusWithRetry(retry uint32) (isLagged, isReplica
 }
 
 // checkSlaveStatus check the slave status.
-func (s *SQLRunner) checkSlaveStatus() (isLagged, isReplicating corev1.ConditionStatus, err error) {
+func checkSlaveStatus(sqlRunner SQLRunner) (isLagged, isReplicating corev1.ConditionStatus, err error) {
 	var rows *sql.Rows
 	isLagged, isReplicating = corev1.ConditionUnknown, corev1.ConditionUnknown
-	rows, err = s.db.Query("show slave status;")
+	rows, err = sqlRunner.QueryRows(NewQuery("show slave status;"))
 	if err != nil {
 		return
 	}
@@ -128,7 +240,7 @@ func (s *SQLRunner) checkSlaveStatus() (isLagged, isReplicating corev1.Condition
 	isReplicating = corev1.ConditionTrue
 
 	var longQueryTime float64
-	if err = s.GetGlobalVariable("long_query_time", &longQueryTime); err != nil {
+	if err = GetGlobalVariable(sqlRunner, "long_query_time", &longQueryTime); err != nil {
 		return
 	}
 
@@ -144,9 +256,9 @@ func (s *SQLRunner) checkSlaveStatus() (isLagged, isReplicating corev1.Condition
 }
 
 // CheckReadOnly check whether the mysql is read only.
-func (s *SQLRunner) CheckReadOnly() (corev1.ConditionStatus, error) {
+func CheckReadOnly(sqlRunner SQLRunner) (corev1.ConditionStatus, error) {
 	var readOnly uint8
-	if err := s.GetGlobalVariable("read_only", &readOnly); err != nil {
+	if err := GetGlobalVariable(sqlRunner, "read_only", &readOnly); err != nil {
 		return corev1.ConditionUnknown, err
 	}
 
@@ -157,24 +269,14 @@ func (s *SQLRunner) CheckReadOnly() (corev1.ConditionStatus, error) {
 	return corev1.ConditionTrue, nil
 }
 
-// RunQuery used to run the query with args.
-func (s *SQLRunner) RunQuery(query string, args ...interface{}) error {
-	if _, err := s.db.Exec(query, args...); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 // GetGlobalVariable used to get the global variable by param.
-func (s *SQLRunner) GetGlobalVariable(param string, val interface{}) error {
-	query := fmt.Sprintf("select @@global.%s", param)
-	return s.db.QueryRow(query).Scan(val)
+func GetGlobalVariable(sqlRunner SQLRunner, param string, val interface{}) error {
+	return sqlRunner.QueryRow(NewQuery("select @@global.?", param), val)
 }
 
-func (s *SQLRunner) CheckProcesslist() (bool, error) {
+func CheckProcesslist(sqlRunner SQLRunner) (bool, error) {
 	var rows *sql.Rows
-	rows, err := s.db.Query("show processlist;")
+	rows, err := sqlRunner.QueryRows(NewQuery("show processlist;"))
 	if err != nil {
 		return false, err
 	}
@@ -205,11 +307,6 @@ func (s *SQLRunner) CheckProcesslist() (bool, error) {
 	return false, nil
 }
 
-// Close closes the database and prevents new queries from starting.
-func (sr *SQLRunner) Close() error {
-	return sr.db.Close()
-}
-
 // columnValue get the column value.
 func columnValue(scanArgs []interface{}, slaveCols []string, colName string) string {
 	columnIndex := -1
@@ -225,4 +322,140 @@ func columnValue(scanArgs []interface{}, slaveCols []string, colName string) str
 	}
 
 	return string(*scanArgs[columnIndex].(*sql.RawBytes))
+}
+
+// CreateUserIfNotExists creates a user if it doesn't already exist and it gives it the specified permissions.
+func CreateUserIfNotExists(
+	sqlRunner SQLRunner, user, pass string, hosts []string, permissions []apiv1alpha1.UserPermission,
+) error {
+
+	// Throw error if there are no allowed hosts.
+	if len(hosts) == 0 {
+		return errors.New("no allowedHosts specified")
+	}
+
+	queries := []Query{
+		getCreateUserQuery(user, pass, hosts),
+		// todo: getAlterUserQuery.
+	}
+
+	if len(permissions) > 0 {
+		queries = append(queries, permissionsToQuery(permissions, user, hosts))
+	}
+
+	query := BuildAtomicQuery(queries...)
+
+	if err := sqlRunner.QueryExec(query); err != nil {
+		return fmt.Errorf("failed to configure user (user/pass/access), err: %s", err)
+	}
+
+	return nil
+}
+
+func getCreateUserQuery(user, pwd string, allowedHosts []string) Query {
+	idsTmpl, idsArgs := getUsersIdentification(user, &pwd, allowedHosts)
+
+	return NewQuery(fmt.Sprintf("CREATE USER IF NOT EXISTS%s", idsTmpl), idsArgs...)
+}
+
+func getUsersIdentification(user string, pwd *string, allowedHosts []string) (ids string, args []interface{}) {
+	for i, host := range allowedHosts {
+		// Add comma if more than one allowed hosts are used.
+		if i > 0 {
+			ids += ","
+		}
+
+		if pwd != nil {
+			ids += " ?@? IDENTIFIED BY ?"
+			args = append(args, user, host, *pwd)
+		} else {
+			ids += " ?@?"
+			args = append(args, user, host)
+		}
+	}
+
+	return ids, args
+}
+
+// DropUser removes a MySQL user if it exists, along with its privileges.
+func DropUser(sqlRunner SQLRunner, user, host string) error {
+	query := NewQuery("DROP USER IF EXISTS ?@?;", user, host)
+
+	if err := sqlRunner.QueryExec(query); err != nil {
+		return fmt.Errorf("failed to delete user, err: %s", err)
+	}
+
+	return nil
+}
+
+func permissionsToQuery(permissions []apiv1alpha1.UserPermission, user string, allowedHosts []string) Query {
+	permQueries := []Query{}
+
+	for _, perm := range permissions {
+		// If you wish to grant permissions on all tables, you should explicitly use "*".
+		for _, table := range perm.Tables {
+			args := []interface{}{}
+
+			escPerms := []string{}
+			for _, perm := range perm.Privileges {
+				escPerms = append(escPerms, Escape(perm))
+			}
+
+			schemaTable := fmt.Sprintf("%s.%s", escapeID(perm.Database), escapeID(table))
+
+			// Build GRANT query.
+			idsTmpl, idsArgs := getUsersIdentification(user, nil, allowedHosts)
+
+			query := "GRANT " + strings.Join(escPerms, ", ") + " ON " + schemaTable + " TO" + idsTmpl
+			args = append(args, idsArgs...)
+
+			permQueries = append(permQueries, NewQuery(query, args...))
+		}
+	}
+
+	return ConcatenateQueries(permQueries...)
+}
+
+func escapeID(id string) string {
+	if id == "*" {
+		return id
+	}
+
+	// don't allow using ` in id name.
+	id = strings.ReplaceAll(id, "`", "")
+
+	return fmt.Sprintf("`%s`", id)
+}
+
+// Escape escapes a string.
+func Escape(sql string) string {
+	dest := make([]byte, 0, 2*len(sql))
+	var escape byte
+	for i := 0; i < len(sql); i++ {
+		escape = 0
+		switch sql[i] {
+		case 0: /* Must be escaped for 'mysql' */
+			escape = '0'
+		case '\n': /* Must be escaped for logs */
+			escape = 'n'
+		case '\r':
+			escape = 'r'
+		case '\\':
+			escape = '\\'
+		case '\'':
+			escape = '\''
+		case '"': /* Better safe than sorry */
+			escape = '"'
+		case '\032': /* This gives problems on Win32 */
+			escape = 'Z'
+		}
+
+		if escape != 0 {
+			dest = append(dest, '\\', escape)
+		} else {
+			dest = append(dest, sql[i])
+		}
+	}
+
+	return string(dest)
 }

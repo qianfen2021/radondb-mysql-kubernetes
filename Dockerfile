@@ -13,11 +13,12 @@ RUN go env -w GOPROXY=https://goproxy.cn,direct; \
 # Copy the go source
 COPY cmd/manager/main.go cmd/manager/main.go
 COPY api/ api/
-COPY cluster/ cluster/
+COPY mysqlcluster/ mysqlcluster/
 COPY controllers/ controllers/
 COPY backup/ backup/
 COPY internal/ internal/
 COPY utils/ utils/
+COPY mysqluser/ mysqluser/
 
 # Build
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager cmd/manager/main.go

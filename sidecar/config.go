@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-
-	// "strings"
 	"text/template"
 
 	"github.com/blang/semver"
@@ -67,6 +65,8 @@ type Config struct {
 	OperatorUser string
 	// The password of operator user.
 	OperatorPassword string
+	// The password of the mysql root user, for operator use only.
+	InternalRootPassword string
 
 	// InitTokuDB represents if install tokudb engine.
 	InitTokuDB bool
@@ -158,7 +158,8 @@ func NewInitConfig() *Config {
 		StatefulSetName: getEnvValue("STATEFULSET_NAME"),
 		Replicas:        int32(replicas),
 
-		RootPassword: getEnvValue("MYSQL_ROOT_PASSWORD"),
+		RootPassword:         getEnvValue("MYSQL_ROOT_PASSWORD"),
+		InternalRootPassword: getEnvValue("INTERNAL_ROOT_PASSWORD"),
 
 		Database: getEnvValue("MYSQL_DATABASE"),
 		User:     getEnvValue("MYSQL_USER"),
@@ -199,10 +200,11 @@ func NewBackupConfig() *Config {
 	}
 
 	return &Config{
-		NameSpace:   getEnvValue("NAMESPACE"),
-		ServiceName: getEnvValue("SERVICE_NAME"),
-		Replicas:    int32(replicas),
-		ClusterName: getEnvValue("SERVICE_NAME"),
+		NameSpace:    getEnvValue("NAMESPACE"),
+		ServiceName:  getEnvValue("SERVICE_NAME"),
+		Replicas:     int32(replicas),
+		ClusterName:  getEnvValue("SERVICE_NAME"),
+		RootPassword: getEnvValue("MYSQL_ROOT_PASSWORD"),
 
 		BackupUser:     getEnvValue("BACKUP_USER"),
 		BackupPassword: getEnvValue("BACKUP_PASSWORD"),
@@ -242,11 +244,6 @@ func GetContainerType() string {
 // build Xtrabackup arguments
 func (cfg *Config) XtrabackupArgs() []string {
 	// xtrabackup --backup <args> --target-dir=<backup-dir> <extra-args>
-	user := "root"
-	if len(cfg.ReplicationUser) != 0 {
-		user = cfg.ReplicationUser
-	}
-
 	tmpdir := "/root/backup/"
 	if len(cfg.XtrabackupTargetDir) != 0 {
 		tmpdir = cfg.XtrabackupTargetDir
@@ -255,7 +252,8 @@ func (cfg *Config) XtrabackupArgs() []string {
 		"--backup",
 		"--stream=xbstream",
 		"--host=127.0.0.1",
-		fmt.Sprintf("--user=%s", user),
+		fmt.Sprintf("--user=%s", utils.RootUser),
+		fmt.Sprintf("--password=%s", cfg.RootPassword),
 		fmt.Sprintf("--target-dir=%s", tmpdir),
 	}
 
@@ -376,6 +374,8 @@ func (cfg *Config) buildInitSql() []byte {
 CREATE DATABASE IF NOT EXISTS %s;
 DROP user IF EXISTS 'root'@'127.0.0.1';
 GRANT ALL ON *.* TO 'root'@'127.0.0.1' IDENTIFIED BY '%s' with grant option;
+DROP user IF EXISTS 'root'@'%%';
+GRANT ALL ON *.* TO 'root'@'%%' IDENTIFIED BY '%s' with grant option;
 DROP user IF EXISTS '%s'@'%%';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '%s'@'%%' IDENTIFIED BY '%s';
 DROP user IF EXISTS '%s'@'%%';
@@ -385,7 +385,7 @@ GRANT SUPER, PROCESS, RELOAD, CREATE, SELECT ON *.* TO '%s'@'%%' IDENTIFIED BY '
 DROP user IF EXISTS '%s'@'%%';
 GRANT ALL ON %s.* TO '%s'@'%%' IDENTIFIED BY '%s';
 FLUSH PRIVILEGES;
-`, cfg.Database, cfg.RootPassword, cfg.ReplicationUser, cfg.ReplicationUser, cfg.ReplicationPassword,
+`, cfg.Database, cfg.RootPassword, cfg.InternalRootPassword, cfg.ReplicationUser, cfg.ReplicationUser, cfg.ReplicationPassword,
 		cfg.MetricsUser, cfg.MetricsUser, cfg.MetricsPassword, cfg.OperatorUser, cfg.OperatorUser,
 		cfg.OperatorPassword, cfg.User, cfg.Database, cfg.User, cfg.Password)
 
@@ -459,7 +459,7 @@ done
 i=0
 while [ $i -lt %d ]; do
 	if [ $i -ne %d ]; then
-		while true; do
+		for k in $(seq 12); do
 			res=$(curl -i -X POST -d '{"address": "%s-'$i'.%s.%s:%d"}' -u root:%s http://%s:%d/v1/cluster/add)
 			code=$(echo $res|grep "HTTP"|awk '{print $2}')
 			if [ "$code" -eq "200" ]; then
@@ -467,7 +467,7 @@ while [ $i -lt %d ]; do
 			fi
 		done
 
-		while true; do
+		for k in $(seq 12); do
 			res=$(curl -i -X POST -d '{"address": "%s:%d"}' -u root:%s http://%s-$i.%s.%s:%d/v1/cluster/add)
 			code=$(echo $res|grep "HTTP"|awk '{print $2}')
 			if [ "$code" -eq "200" ]; then
@@ -544,13 +544,13 @@ curl -X PATCH -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/ser
 // build S3 restore shell script
 func (cfg *Config) buildS3Restore(path string) error {
 	if len(cfg.XRestoreFrom) == 0 {
-		return fmt.Errorf("Do not have restore from")
+		return fmt.Errorf("do not have restore from")
 	}
 	if len(cfg.XCloudS3EndPoint) == 0 ||
 		len(cfg.XCloudS3AccessKey) == 0 ||
 		len(cfg.XCloudS3SecretKey) == 0 ||
 		len(cfg.XCloudS3Bucket) == 0 {
-		return fmt.Errorf("Do not have S3 information")
+		return fmt.Errorf("do not have S3 information")
 	}
 	f, err := os.Create(path)
 	if err != nil {

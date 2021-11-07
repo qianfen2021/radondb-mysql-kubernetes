@@ -10,7 +10,7 @@ resources:
   controller: true
   domain: radondb.com
   group: mysql
-  kind: Cluster
+  kind: MysqlCluster
   path: github.com/radondb/radondb-mysql-kubernetes/api/v1alpha1
   version: v1alpha1
 - controller: true
@@ -25,6 +25,15 @@ resources:
   domain: radondb.com
   group: mysql
   kind: Backup
+  path: github.com/radondb/radondb-mysql-kubernetes/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: radondb.com
+  group: mysql
+  kind: MysqlUser
   path: github.com/radondb/radondb-mysql-kubernetes/api/v1alpha1
   version: v1alpha1
 version: "3"

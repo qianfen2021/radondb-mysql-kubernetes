@@ -38,8 +38,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	apiv1alpha1 "github.com/radondb/radondb-mysql-kubernetes/api/v1alpha1"
-	"github.com/radondb/radondb-mysql-kubernetes/cluster"
-	clustersyncer "github.com/radondb/radondb-mysql-kubernetes/cluster/syncer"
+	"github.com/radondb/radondb-mysql-kubernetes/internal"
+	"github.com/radondb/radondb-mysql-kubernetes/mysqlcluster"
+	clustersyncer "github.com/radondb/radondb-mysql-kubernetes/mysqlcluster/syncer"
 )
 
 // reconcileTimePeriod represents the time in which a cluster should be reconciled
@@ -50,6 +51,9 @@ type StatusReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
+
+	// Mysql query runner.
+	internal.SQLRunnerFactory
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -65,7 +69,7 @@ func (r *StatusReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	log := log.FromContext(ctx).WithName("controllers").WithName("Status")
 
 	// your logic here
-	instance := cluster.New(&apiv1alpha1.Cluster{})
+	instance := mysqlcluster.New(&apiv1alpha1.MysqlCluster{})
 
 	err := r.Get(ctx, req.NamespacedName, instance.Unwrap())
 	if err != nil {
@@ -88,7 +92,7 @@ func (r *StatusReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 	}()
 
-	statusSyncer := clustersyncer.NewStatusSyncer(instance, r.Client)
+	statusSyncer := clustersyncer.NewStatusSyncer(instance, r.Client, r.SQLRunnerFactory)
 	if err := syncer.Sync(ctx, statusSyncer, r.Recorder); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -102,8 +106,8 @@ func (r *StatusReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	clusters := &sync.Map{}
 	events := make(chan event.GenericEvent, 1024)
 	bld := ctrl.NewControllerManagedBy(mgr).
-		For(&apiv1alpha1.Cluster{}).
-		Watches(&source.Kind{Type: &apiv1alpha1.Cluster{}}, &handler.Funcs{
+		For(&apiv1alpha1.MysqlCluster{}).
+		Watches(&source.Kind{Type: &apiv1alpha1.MysqlCluster{}}, &handler.Funcs{
 			CreateFunc: func(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
 				if evt.Object == nil {
 					log.Error(nil, "CreateEvent received with no metadata", "CreateEvent", evt)
@@ -111,9 +115,7 @@ func (r *StatusReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				}
 
 				log.V(1).Info("register cluster in clusters list", "obj", evt.Object)
-				clusters.Store(getKey(evt.Object), event.GenericEvent{
-					Object: evt.Object,
-				})
+				clusters.Store(getKey(evt.Object), event.GenericEvent(evt))
 			},
 			DeleteFunc: func(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
 				if evt.Object == nil {

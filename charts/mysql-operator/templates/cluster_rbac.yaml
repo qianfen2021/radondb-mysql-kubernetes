@@ -76,7 +76,7 @@ rules:
 - apiGroups:
   - mysql.radondb.com
   resources:
-  - clusters
+  - mysqlclusters
   verbs:
   - create
   - delete
@@ -88,13 +88,39 @@ rules:
 - apiGroups:
   - mysql.radondb.com
   resources:
-  - clusters/finalizers
+  - mysqlclusters/finalizers
   verbs:
   - update
 - apiGroups:
   - mysql.radondb.com
   resources:
-  - clusters/status
+  - mysqlclusters/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - mysql.radondb.com
+  resources:
+  - mysqlusers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - mysql.radondb.com
+  resources:
+  - mysqlusers/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - mysql.radondb.com
+  resources:
+  - mysqlusers/status
   verbs:
   - get
   - patch
@@ -141,6 +167,8 @@ rules:
   - backups/status
   verbs:
   - get
+  - patch
+  - update
 
 - apiGroups:
   - rbac.authorization.k8s.io
