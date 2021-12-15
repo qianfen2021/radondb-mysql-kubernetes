@@ -18,11 +18,8 @@ package syncer
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"time"
 
 	"github.com/iancoleman/strcase"
@@ -66,10 +63,12 @@ type StatefulSetSyncer struct {
 
 	// Mysql query runner.
 	internal.SQLRunnerFactory
+	// XenonExecutor is used to execute Xenon HTTP instructions.
+	internal.XenonExecutor
 }
 
 // NewStatefulSetSyncer returns a pointer to StatefulSetSyncer.
-func NewStatefulSetSyncer(cli client.Client, c *mysqlcluster.MysqlCluster, cmRev, sctRev string, sqlRunnerFactory internal.SQLRunnerFactory) *StatefulSetSyncer {
+func NewStatefulSetSyncer(cli client.Client, c *mysqlcluster.MysqlCluster, cmRev, sctRev string, sqlRunnerFactory internal.SQLRunnerFactory, xenonExecutor internal.XenonExecutor) *StatefulSetSyncer {
 	return &StatefulSetSyncer{
 		MysqlCluster: c,
 		cli:          cli,
@@ -86,6 +85,7 @@ func NewStatefulSetSyncer(cli client.Client, c *mysqlcluster.MysqlCluster, cmRev
 		cmRev:            cmRev,
 		sctRev:           sctRev,
 		SQLRunnerFactory: sqlRunnerFactory,
+		XenonExecutor:    xenonExecutor,
 	}
 }
 
@@ -289,7 +289,7 @@ func (s *StatefulSetSyncer) createOrUpdate(ctx context.Context) (controllerutil.
 // updatePod update the pods, update follower nodes first.
 // This can reduce the number of master-slave switching during the update process.
 func (s *StatefulSetSyncer) updatePod(ctx context.Context) error {
-	if s.sfs.Status.UpdatedReplicas >= s.sfs.Status.Replicas {
+	if s.sfs.Status.UpdateRevision == s.sfs.Status.CurrentRevision {
 		return nil
 	}
 
@@ -317,7 +317,6 @@ func (s *StatefulSetSyncer) updatePod(ctx context.Context) error {
 		return err
 	}
 	var leaderPod corev1.Pod
-	var followerPods []corev1.Pod
 	for _, pod := range pods.Items {
 		// Check if the pod is healthy.
 		if pod.ObjectMeta.Labels["healthy"] != "yes" {
@@ -328,117 +327,15 @@ func (s *StatefulSetSyncer) updatePod(ctx context.Context) error {
 			leaderPod = pod
 			continue
 		}
-		followerPods = append(followerPods, pod)
 		// If pod is not leader, direct update.
 		if err := s.applyNWait(ctx, &pod); err != nil {
 			return err
 		}
 	}
-	// All followers have been updated now, then update leader.
-	if leaderPod.Name != "" {
-		// When replicas is two (one leader and one follower).
-		if *s.sfs.Spec.Replicas == 2 {
-			if err := s.preUpdate(ctx, leaderPod.Name, followerPods[0].Name); err != nil {
-				return err
-			}
-		}
-		// Update the leader.
-		if err := s.applyNWait(ctx, &leaderPod); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// preUpdate run before update the leader pod when replicas is 2.
-// Its main function is manually switch the leader node.
-// 1. Get secrets (operator-user, operator-password, root-password).
-// 2. Connect leader mysql.
-// 3. Set leader read only.
-// 4. Make sure the leader has sent all binlog to follower.
-// 5. Check followerHost current role.
-// 6. If followerHost is not leader, switch it to leader through xenon.
-func (s *StatefulSetSyncer) preUpdate(ctx context.Context, leader, follower string) error {
-	leaderRunner, closeConn, err := s.SQLRunnerFactory(internal.NewConfigFromClusterKey(
-		s.cli, s.MysqlCluster.GetClusterKey(), utils.OperatorUser, utils.LeaderHost))
-	if err != nil {
+	// Update the leader.
+	if err := s.applyNWait(ctx, &leaderPod); err != nil {
 		return err
 	}
-	defer closeConn()
-
-	// Status.Replicas indicate the number of Pod has been created.
-	// So sfs.Spec.Replicas is 2, May be sfs.Status.Replicas maybe are 3, 5 ,
-	// because it do not update the pods, so it is still the last status.
-	if *s.sfs.Spec.Replicas != 2 {
-		return nil
-	}
-
-	// Touch a new preUpdate file ,indicate that preUpdate is going on
-	// remove it when it is finished.
-	// See https://github.com/radondb/radondb-mysql-kubernetes/issues/178
-	utils.TouchUpdateFile()
-	defer utils.RemoveUpdateFile()
-	sctName := s.GetNameForResource(utils.Secret)
-	svcName := s.GetNameForResource(utils.HeadlessSVC)
-	nameSpace := s.Namespace
-
-	// Get secrets.
-	secret := &corev1.Secret{}
-	if err := s.cli.Get(context.TODO(),
-		types.NamespacedName{
-			Namespace: nameSpace,
-			Name:      sctName,
-		},
-		secret,
-	); err != nil {
-		return fmt.Errorf("failed to get the secret: %s", sctName)
-	}
-
-	rootPasswd, ok := secret.Data["root-password"]
-	if !ok {
-		return fmt.Errorf("failed to get the root password: %s", rootPasswd)
-	}
-
-	if err = retry(time.Second*2, time.Duration(waitLimit)*time.Second, func() (bool, error) {
-		// Set leader read only.
-		if err = leaderRunner.QueryExec(internal.NewQuery("SET GLOBAL super_read_only=on;")); err != nil {
-			log.Error(err, "failed to set leader read only", "node", leader)
-			return false, err
-		}
-
-		// Make sure the master has sent all binlog to slave.
-		success, err := internal.CheckProcesslist(leaderRunner)
-		if err != nil {
-			return false, err
-		}
-		if success {
-			return true, nil
-		}
-		return false, nil
-	}); err != nil {
-		return err
-	}
-
-	followerHost := fmt.Sprintf("%s.%s.%s", follower, svcName, nameSpace)
-	if err = retry(time.Second*5, time.Second*60, func() (bool, error) {
-		// Check whether is leader.
-		status, err := checkRole(followerHost, rootPasswd)
-		if err != nil {
-			log.Error(err, "failed to check role", "pod", follower)
-			return false, nil
-		}
-		if status == corev1.ConditionTrue {
-			return true, nil
-		}
-
-		// If not leader, try to leader.
-		xenonHttpRequest(followerHost, "POST", "/v1/raft/trytoleader", rootPasswd, nil)
-		return false, nil
-	}); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -529,6 +426,10 @@ func (s *StatefulSetSyncer) ensurePodSpec() corev1.PodSpec {
 
 // updatePVC used to update the pvc, check and remove the extra pvc.
 func (s *StatefulSetSyncer) updatePVC(ctx context.Context) error {
+	if *s.Spec.Replicas == 0 {
+		log.Info("skip update pvc because replicas is 0")
+		return nil
+	}
 	pvcs := corev1.PersistentVolumeClaimList{}
 	if err := s.cli.List(ctx,
 		&pvcs,
@@ -573,6 +474,12 @@ func (s *StatefulSetSyncer) applyNWait(ctx context.Context, pod *corev1.Pod) err
 		if pod.DeletionTimestamp != nil {
 			log.Info("pod is being deleted", "pod", pod.Name, "key", s.Unwrap())
 		} else {
+			// If healthy is always `yes`, retry() will exit in advance, which may
+			// cause excessive nodes are deleted at the same time, details: issue#310.
+			pod.ObjectMeta.Labels["healthy"] = "no"
+			if err := s.cli.Update(ctx, pod); err != nil {
+				return err
+			}
 			if err := s.cli.Delete(ctx, pod); err != nil {
 				return err
 			}
@@ -654,27 +561,6 @@ func basicEventReason(objKindName string, err error) string {
 	}
 
 	return fmt.Sprintf("%sSyncSuccessfull", strcase.ToCamel(objKindName))
-}
-
-func xenonHttpRequest(host, method, url string, rootPasswd []byte, body io.Reader) (io.ReadCloser, error) {
-	req, err := http.NewRequest(method, fmt.Sprintf("http://%s:%d%s", host, utils.XenonPeerPort, url), body)
-	if err != nil {
-		return nil, err
-	}
-	encoded := base64.StdEncoding.EncodeToString(append([]byte("root:"), rootPasswd...))
-	req.Header.Set("Authorization", "Basic "+encoded)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("get raft status failed, status code is %d", resp.StatusCode)
-	}
-
-	return resp.Body, nil
 }
 
 // check the backup is exist and running

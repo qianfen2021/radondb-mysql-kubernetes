@@ -19,12 +19,14 @@ package sidecar
 import (
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
 	"path"
 	"strconv"
 
+	"github.com/radondb/radondb-mysql-kubernetes/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -34,6 +36,9 @@ func NewInitCommand(cfg *Config) *cobra.Command {
 		Use:   "init",
 		Short: "do some initialization operations.",
 		Run: func(cmd *cobra.Command, args []string) {
+			if err := runCloneAndInit(cfg); err != nil {
+				log.Error(err, "clone error")
+			}
 			if err := runInitCommand(cfg); err != nil {
 				log.Error(err, "init command failed")
 				os.Exit(1)
@@ -42,6 +47,63 @@ func NewInitCommand(cfg *Config) *cobra.Command {
 	}
 
 	return cmd
+}
+
+// Check leader or follower backup status is ok.
+func CheckServiceExist(cfg *Config, service string) bool {
+	serviceURL := fmt.Sprintf("http://%s-%s:%v%s", cfg.ClusterName, service, utils.XBackupPort, "/health")
+	req, err := http.NewRequest("GET", serviceURL, nil)
+	if err != nil {
+		log.Info("failed to check available service", "service", serviceURL, "error", err)
+		return false
+	}
+
+	client := &http.Client{}
+	client.Transport = transportWithTimeout(serverConnectTimeout)
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Info("service was not available", "service", serviceURL, "error", err)
+		return false
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		log.Info("service not available", "service", serviceURL, "HTTP status code", resp.StatusCode)
+		return false
+	}
+
+	return true
+}
+
+// Clone from leader or follower.
+func runCloneAndInit(cfg *Config) error {
+	//check follower is exists?
+	serviceURL := ""
+	if len(serviceURL) == 0 && CheckServiceExist(cfg, "follower") {
+		serviceURL = fmt.Sprintf("http://%s-%s:%v", cfg.ClusterName, "follower", utils.XBackupPort)
+	}
+	//check leader is exist?
+	if len(serviceURL) == 0 && CheckServiceExist(cfg, "leader") {
+		serviceURL = fmt.Sprintf("http://%s-%s:%v", cfg.ClusterName, "leader", utils.XBackupPort)
+	}
+
+	if len(serviceURL) != 0 {
+		// backup at first
+		Args := fmt.Sprintf("rm -rf /backup/initbackup;mkdir -p /backup/initbackup;curl --user $BACKUP_USER:$BACKUP_PASSWORD %s/download|xbstream -x -C /backup/initbackup; exit ${PIPESTATUS[0]}",
+			serviceURL)
+		cmd := exec.Command("/bin/bash", "-c", "--", Args)
+		log.Info("runCloneAndInit", "cmd", Args)
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to disable the run restore: %s", err)
+		}
+		cfg.XRestoreFrom = backupInitDirectory
+		cfg.CloneFlag = true
+		return nil
+	}
+	log.Info("no leader or follower found")
+	return nil
 }
 
 // runInitCommand do some initialization operations.
@@ -115,23 +177,6 @@ func runInitCommand(cfg *Config) error {
 		return fmt.Errorf("failed to save extra.cnf: %s", err)
 	}
 
-	// build post-start.sh.
-	bashPostStartPath := path.Join(scriptsPath, "post-start.sh")
-	bashPostStart, err := cfg.buildPostStart()
-	if err != nil {
-		return fmt.Errorf("failed to build post-start.sh: %s", err)
-	}
-	if err = ioutil.WriteFile(bashPostStartPath, bashPostStart, os.FileMode(0755)); err != nil {
-		return fmt.Errorf("failed to write post-start.sh: %s", err)
-	}
-
-	// build pre-stop.sh.
-	bashPreStopPath := path.Join(scriptsPath, "pre-stop.sh")
-	bashPreStop := cfg.buildPreStop()
-	if err = ioutil.WriteFile(bashPreStopPath, bashPreStop, os.FileMode(0755)); err != nil {
-		return fmt.Errorf("failed to write pre-stop.sh: %s", err)
-	}
-
 	// build leader-start.sh.
 	bashLeaderStart := cfg.buildLeaderStart()
 	leaderStartPath := path.Join(scriptsPath, "leader-start.sh")
@@ -156,40 +201,43 @@ func runInitCommand(cfg *Config) error {
 		}
 	}
 
+	// run the restore.
+	// Check datadir is empty.
+	// if /var/lib/mysql/mysql is empty, then run the restore.
+	// otherwise , it must be has data, then do nothing.
+	if exists, _ := checkIfPathExists(dataPath + "/mysql"); !exists {
+		if len(cfg.XRestoreFrom) != 0 {
+			var err_f error
+			if cfg.CloneFlag {
+				err_f = cfg.executeCloneRestore()
+				if err_f != nil {
+					return fmt.Errorf("failed to execute Clone Restore : %s", err_f)
+				}
+			} else {
+				if err = cfg.executeS3Restore(cfg.XRestoreFrom); err != nil {
+					return fmt.Errorf("failed to restore from %s: %s", cfg.XRestoreFrom, err)
+				}
+			}
+
+		}
+	}
+
 	// build xenon.json.
 	xenonFilePath := path.Join(xenonPath, "xenon.json")
 	if err = ioutil.WriteFile(xenonFilePath, cfg.buildXenonConf(), 0644); err != nil {
 		return fmt.Errorf("failed to write xenon.json: %s", err)
 	}
-
-	// run the restore
-	if len(cfg.XRestoreFrom) != 0 {
-		var restoreName string = "/restore.sh"
-		err_f := cfg.buildS3Restore(restoreName)
-		if err_f != nil {
-			return fmt.Errorf("build restore.sh fail : %s", err_f)
-		}
-		if err = os.Chmod(restoreName, os.FileMode(0755)); err != nil {
-			return fmt.Errorf("failed to chmod scripts: %s", err)
-		}
-		cmd := exec.Command("sh", "-c", restoreName)
-		cmd.Stderr = os.Stderr
-		if err = cmd.Run(); err != nil {
-			return fmt.Errorf("failed to disable the run restore: %s", err)
-		}
-	}
-
 	log.Info("init command success")
 	return nil
 }
 
-/*start the backup http server*/
+// start the backup http server.
 func RunHttpServer(cfg *Config, stop <-chan struct{}) error {
 	srv := newServer(cfg, stop)
 	return srv.ListenAndServe()
 }
 
-// request a backup command
+// request a backup command.
 func RunRequestBackup(cfg *Config, host string) error {
 	_, err := requestABackup(cfg, host, serverBackupEndpoint)
 	return err

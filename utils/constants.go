@@ -16,9 +16,14 @@ limitations under the License.
 
 package utils
 
+import "net/http"
+
 var (
 	// MySQLDefaultVersion is the version for mysql that should be used
 	MySQLDefaultVersion = "5.7.34"
+
+	// InvalidMySQLVersion is used for set invalid version that we do not support.
+	InvalidMySQLVersion = "0.0.0"
 
 	// MySQLTagsToSemVer maps simple version to semver versions
 	MySQLTagsToSemVer = map[string]string{
@@ -29,6 +34,16 @@ var (
 	MysqlImageVersions = map[string]string{
 		"5.7.33": "percona/percona-server:5.7.33",
 		"5.7.34": "percona/percona-server:5.7.34",
+		"0.0.0":  "errimage",
+	}
+
+	// XenonHttpUrls saves the xenon http url and its corresponding request type.
+	XenonHttpUrls = map[XenonHttpUrl]string{
+		RaftStatus:      http.MethodGet,
+		RaftTryToLeader: http.MethodPost,
+		XenonPing:       http.MethodGet,
+		ClusterAdd:      http.MethodPost,
+		ClusterRemove:   http.MethodPost,
 	}
 )
 
@@ -93,6 +108,15 @@ const (
 	XenonVolumeMountPath    = "/etc/xenon"
 	InitFileVolumeMountPath = "/docker-entrypoint-initdb.d"
 
+	// Volume timezone name.
+	SysLocalTimeZone = "localtime"
+
+	// Volume host path for time zone.
+	SysLocalTimeZoneHostPath = "/etc/localtime"
+
+	// Volume mount path for time zone.
+	SysLocalTimeZoneMountPath = "/etc/localtime"
+
 	// The path to the client MySQL client configuration.
 	// The file used to liveness and readiness check.
 	ConfClientPath = "/etc/mysql/client.conf"
@@ -134,3 +158,23 @@ const (
 
 // JobType
 const BackupJobTypeName = ContainerBackupName
+
+// RaftRole is the role of the node in raft.
+type RaftRole string
+
+const (
+	Leader    RaftRole = "LEADER"
+	Follower  RaftRole = "FOLLOWER"
+	Candidate RaftRole = "CANDIDATE"
+)
+
+// XenonHttpUrl is a http url corresponding to the xenon instruction.
+type XenonHttpUrl string
+
+const (
+	RaftStatus      XenonHttpUrl = "/v1/raft/status"
+	XenonPing       XenonHttpUrl = "/v1/xenon/ping"
+	ClusterAdd      XenonHttpUrl = "/v1/cluster/add"
+	ClusterRemove   XenonHttpUrl = "/v1/cluster/remove"
+	RaftTryToLeader XenonHttpUrl = "/v1/raft/trytoleader"
+)

@@ -24,6 +24,7 @@ import (
 
 	mysqlv1alpha1 "github.com/radondb/radondb-mysql-kubernetes/api/v1alpha1"
 	"github.com/radondb/radondb-mysql-kubernetes/mysqlcluster"
+	"github.com/radondb/radondb-mysql-kubernetes/utils"
 )
 
 var (
@@ -107,7 +108,7 @@ func TestGetMysqlLivenessProbe(t *testing.T) {
 	livenessProbe := &corev1.Probe{
 		Handler: corev1.Handler{
 			Exec: &corev1.ExecAction{
-				Command: []string{"sh", "-c", "mysqladmin --defaults-file=/etc/mysql/client.conf ping"},
+				Command: []string{"pgrep", "mysqld"},
 			},
 		},
 		InitialDelaySeconds: 30,
@@ -148,6 +149,10 @@ func TestGetMysqlVolumeMounts(t *testing.T) {
 		{
 			Name:      "logs",
 			MountPath: "/var/log/mysql",
+		},
+		{
+			Name:      utils.SysLocalTimeZone,
+			MountPath: "/etc/localtime",
 		},
 	}
 	assert.Equal(t, volumeMounts, mysqlCase.VolumeMounts)

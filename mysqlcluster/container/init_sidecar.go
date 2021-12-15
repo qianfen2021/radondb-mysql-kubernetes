@@ -17,7 +17,6 @@ limitations under the License.
 package container
 
 import (
-	"fmt"
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
@@ -80,10 +79,6 @@ func (c *initSidecar) getEnvVars() []corev1.EnvVar {
 			Value: c.GetNameForResource(utils.StatefulSet),
 		},
 		{
-			Name:  "REPLICAS",
-			Value: fmt.Sprintf("%d", *c.Spec.Replicas),
-		},
-		{
 			Name:  "ADMIT_DEFEAT_HEARBEAT_COUNT",
 			Value: strconv.Itoa(int(*c.Spec.XenonOpts.AdmitDefeatHearbeatCount)),
 		},
@@ -99,7 +94,10 @@ func (c *initSidecar) getEnvVars() []corev1.EnvVar {
 			Name:  "RESTORE_FROM",
 			Value: c.Spec.RestoreFrom,
 		},
-
+		{
+			Name:  "CLUSTER_NAME",
+			Value: c.Name,
+		},
 		getEnvVarFromSecret(sctName, "MYSQL_ROOT_PASSWORD", "root-password", false),
 		getEnvVarFromSecret(sctName, "INTERNAL_ROOT_PASSWORD", "internal-root-password", true),
 		getEnvVarFromSecret(sctName, "MYSQL_DATABASE", "mysql-database", true),
@@ -183,6 +181,10 @@ func (c *initSidecar) getVolumeMounts() []corev1.VolumeMount {
 		{
 			Name:      utils.InitFileVolumeName,
 			MountPath: utils.InitFileVolumeMountPath,
+		},
+		{
+			Name:      utils.SysLocalTimeZone,
+			MountPath: utils.SysLocalTimeZoneMountPath,
 		},
 	}
 

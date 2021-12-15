@@ -1182,7 +1182,7 @@ spec:
                   schedulerName:
                     type: string
                   sidecarImage:
-                    default: radondb/mysql-sidecar:0.1
+                    default: radondb/mysql-sidecar:latest
                     description: To specify the image that will be used for sidecar
                       container.
                     type: string
@@ -1379,6 +1379,23 @@ spec:
                     name:
                       description: Name of the node.
                       type: string
+                    raftStatus:
+                      description: RaftStatus is the raft status of the node.
+                      properties:
+                        leader:
+                          description: Leader is the name of the Leader of the current
+                            node.
+                          type: string
+                        nodes:
+                          description: Nodes is a list of nodes that can be identified
+                            by the current node.
+                          items:
+                            type: string
+                          type: array
+                        role:
+                          description: Role is one of (LEADER/CANDIDATE/FOLLOWER/IDLE/INVALID)
+                          type: string
+                      type: object
                   required:
                   - name
                   type: object

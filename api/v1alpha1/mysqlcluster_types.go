@@ -199,7 +199,7 @@ type PodPolicy struct {
 
 	// To specify the image that will be used for sidecar container.
 	// +optional
-	// +kubebuilder:default:="radondb/mysql-sidecar:0.1"
+	// +kubebuilder:default:="radondb/mysql-sidecar:latest"
 	SidecarImage string `json:"sidecarImage,omitempty"`
 
 	// The busybox image.
@@ -247,7 +247,7 @@ type Persistence struct {
 type ClusterState string
 
 const (
-	// ClusterInitState  indicates whether the cluster is initializing.
+	// ClusterInitState indicates whether the cluster is initializing.
 	ClusterInitState ClusterState = "Initializing"
 	// ClusterUpdateState indicates whether the cluster is being updated.
 	ClusterUpdateState ClusterState = "Updating"
@@ -255,6 +255,10 @@ const (
 	ClusterReadyState ClusterState = "Ready"
 	// ClusterCloseState indicates whether the cluster is closed.
 	ClusterCloseState ClusterState = "Closed"
+	// ClusterScaleInState indicates whether the cluster replicas is decreasing.
+	ClusterScaleInState ClusterState = "ScaleIn"
+	// ClusterScaleOutState indicates whether the cluster replicas is increasing.
+	ClusterScaleOutState ClusterState = "ScaleOut"
 )
 
 // ClusterConditionType defines type for cluster condition type.
@@ -271,6 +275,10 @@ const (
 	ConditionClose ClusterConditionType = "Closed"
 	// ConditionError indicates whether there is an error in the cluster.
 	ConditionError ClusterConditionType = "Error"
+	// ConditionScaleIn indicates whether the cluster replicas is decreasing.
+	ConditionScaleIn ClusterConditionType = "ScaleIn"
+	// ConditionScaleOut indicates whether the cluster replicas is increasing.
+	ConditionScaleOut ClusterConditionType = "ScaleOut"
 )
 
 // ClusterCondition defines type for cluster conditions.
@@ -294,8 +302,19 @@ type NodeStatus struct {
 	Name string `json:"name"`
 	// Full text reason for current status of the node.
 	Message string `json:"message,omitempty"`
+	// RaftStatus is the raft status of the node.
+	RaftStatus RaftStatus `json:"raftStatus,omitempty"`
 	// Conditions contains the list of the node conditions fulfilled.
 	Conditions []NodeCondition `json:"conditions,omitempty"`
+}
+
+type RaftStatus struct {
+	// Role is one of (LEADER/CANDIDATE/FOLLOWER/IDLE/INVALID)
+	Role string `json:"role,omitempty"`
+	// Leader is the name of the Leader of the current node.
+	Leader string `json:"leader,omitempty"`
+	// Nodes is a list of nodes that can be identified by the current node.
+	Nodes []string `json:"nodes,omitempty"`
 }
 
 // NodeCondition defines type for representing node conditions.

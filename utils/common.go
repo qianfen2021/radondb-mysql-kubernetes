@@ -17,7 +17,10 @@ limitations under the License.
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"os"
 	"sort"
 	"strconv"
@@ -107,7 +110,6 @@ func StringDiffIn(actual, desired []string) []string {
 			diff = append(diff, aStr)
 		}
 	}
-
 	return diff
 }
 
@@ -117,6 +119,17 @@ func stringIn(str string, strs []string) (int, bool) {
 			return i, true
 		}
 	}
-
 	return 0, false
+}
+
+func UnmarshalJSON(in io.Reader, obj interface{}) error {
+	body, err := ioutil.ReadAll(in)
+	if err != nil {
+		return fmt.Errorf("io read error: %s", err)
+	}
+
+	if err = json.Unmarshal(body, obj); err != nil {
+		return fmt.Errorf("error unmarshal data, error: %s, body: %s", err, string(body))
+	}
+	return nil
 }

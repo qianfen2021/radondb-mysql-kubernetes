@@ -53,18 +53,7 @@ func (c *xenon) getEnvVars() []corev1.EnvVar {
 
 // getLifecycle get the container lifecycle.
 func (c *xenon) getLifecycle() *corev1.Lifecycle {
-	return &corev1.Lifecycle{
-		PostStart: &corev1.Handler{
-			Exec: &corev1.ExecAction{
-				Command: []string{"sh", "-c", "/scripts/post-start.sh"},
-			},
-		},
-		PreStop: &corev1.Handler{
-			Exec: &corev1.ExecAction{
-				Command: []string{"sh", "-c", "/scripts/pre-stop.sh"},
-			},
-		},
-	}
+	return nil
 }
 
 // getResources get the container resources.
@@ -124,6 +113,10 @@ func (c *xenon) getVolumeMounts() []corev1.VolumeMount {
 		{
 			Name:      utils.XenonVolumeName,
 			MountPath: utils.XenonVolumeMountPath,
+		},
+		{
+			Name:      utils.SysLocalTimeZone,
+			MountPath: utils.SysLocalTimeZoneMountPath,
 		},
 	}
 }

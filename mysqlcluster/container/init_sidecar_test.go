@@ -17,7 +17,6 @@ limitations under the License.
 package container
 
 import (
-	"fmt"
 	"strconv"
 	"testing"
 
@@ -54,6 +53,7 @@ var (
 			MetricsOpts: mysqlv1alpha1.MetricsOpts{
 				Enabled: false,
 			},
+			MysqlVersion: "5.7",
 			MysqlOpts: mysqlv1alpha1.MysqlOpts{
 				InitTokuDB: false,
 			},
@@ -92,10 +92,6 @@ var (
 			Value: "sample-mysql",
 		},
 		{
-			Name:  "REPLICAS",
-			Value: fmt.Sprintf("%d", *testInitSidecarCluster.Spec.Replicas),
-		},
-		{
 			Name:  "ADMIT_DEFEAT_HEARBEAT_COUNT",
 			Value: strconv.Itoa(int(*testInitSidecarCluster.Spec.XenonOpts.AdmitDefeatHearbeatCount)),
 		},
@@ -110,6 +106,10 @@ var (
 		{
 			Name:  "RESTORE_FROM",
 			Value: "",
+		},
+		{
+			Name:  "CLUSTER_NAME",
+			Value: "sample",
 		},
 		{
 			Name: "MYSQL_ROOT_PASSWORD",
@@ -290,6 +290,10 @@ var (
 			Name:      utils.InitFileVolumeName,
 			MountPath: utils.InitFileVolumeMountPath,
 		},
+		{
+			Name:      utils.SysLocalTimeZone,
+			MountPath: utils.SysLocalTimeZoneMountPath,
+		},
 	}
 	initSidecarCase = EnsureContainer("init-sidecar", &testInitSidecarCluster)
 )
@@ -432,7 +436,7 @@ func TestGetInitSidecarVolumeMounts(t *testing.T) {
 			MysqlCluster: &testToKuDBMysqlCluster,
 		}
 		tokudbCase := EnsureContainer("init-sidecar", &testTokuDBCluster)
-		tokuDBVolumeMounts := make([]corev1.VolumeMount, 5, 6)
+		tokuDBVolumeMounts := make([]corev1.VolumeMount, 6, 7)
 		copy(tokuDBVolumeMounts, defaultInitsidecarVolumeMounts)
 		tokuDBVolumeMounts = append(tokuDBVolumeMounts, corev1.VolumeMount{
 			Name:      utils.SysVolumeName,
@@ -448,7 +452,7 @@ func TestGetInitSidecarVolumeMounts(t *testing.T) {
 			MysqlCluster: &testPersistenceMysqlCluster,
 		}
 		persistenceCase := EnsureContainer("init-sidecar", &testPersistenceCluster)
-		persistenceVolumeMounts := make([]corev1.VolumeMount, 5, 6)
+		persistenceVolumeMounts := make([]corev1.VolumeMount, 6, 7)
 		copy(persistenceVolumeMounts, defaultInitsidecarVolumeMounts)
 		persistenceVolumeMounts = append(persistenceVolumeMounts, corev1.VolumeMount{
 			Name:      utils.DataVolumeName,

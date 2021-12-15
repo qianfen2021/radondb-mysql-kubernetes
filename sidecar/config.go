@@ -18,9 +18,12 @@ package sidecar
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
+	"os/exec"
+	"path"
 	"strconv"
-	"text/template"
+	"strings"
 
 	"github.com/blang/semver"
 	"github.com/go-ini/ini"
@@ -38,8 +41,6 @@ type Config struct {
 	ServiceName string
 	// The name of the statefulset.
 	StatefulSetName string
-	// Replicas is the number of pods.
-	Replicas int32
 
 	// The password of the root user.
 	RootPassword string
@@ -76,7 +77,7 @@ type Config struct {
 
 	// The parameter in xenon means admit defeat count for hearbeat.
 	AdmitDefeatHearbeatCount int32
-	// The parameter in xenon means election timeout(ms)。
+	// The parameter in xenon means election timeout(ms).
 	ElectionTimeout int32
 
 	// Whether the MySQL data exists.
@@ -118,21 +119,26 @@ type Config struct {
 
 	// directory in S3 bucket for cluster restore from
 	XRestoreFrom string
+
+	// Clone flag
+	CloneFlag bool
+
+	// GtidPurged is the gtid set of the slave cluster to purged.
+	GtidPurged string
 }
 
-// NewInitConfig returns the configuration file needed for initialization.
+// NewInitConfig returns a pointer to Config.
 func NewInitConfig() *Config {
-	mysqlVersion, err := semver.Parse(getEnvValue("MYSQL_VERSION"))
-	if err != nil {
-		log.Info("MYSQL_VERSION is not a semver version")
-		mysqlVersion, _ = semver.Parse(utils.MySQLDefaultVersion)
-	}
-
-	replicaStr := getEnvValue("REPLICAS")
-	replicas, err := strconv.ParseInt(replicaStr, 10, 32)
-	if err != nil {
-		log.Error(err, "invalid environment values", "REPLICAS", replicaStr)
-		panic(err)
+	// check mysql version is supported or not and then get parse mysql semver version
+	var mysqlSemVer semver.Version
+	if ver := getEnvValue("MYSQL_VERSION"); ver == utils.InvalidMySQLVersion {
+		panic("invalid mysql version, currently we only support 5.7 or 8.0")
+	} else {
+		mysqlSemVer, err := semver.Parse(ver)
+		if err != nil {
+			log.Info("semver get from MYSQL_VERSION is invalid", "semver: ", mysqlSemVer)
+			panic(err)
+		}
 	}
 
 	initTokuDB := false
@@ -156,7 +162,6 @@ func NewInitConfig() *Config {
 		NameSpace:       getEnvValue("NAMESPACE"),
 		ServiceName:     getEnvValue("SERVICE_NAME"),
 		StatefulSetName: getEnvValue("STATEFULSET_NAME"),
-		Replicas:        int32(replicas),
 
 		RootPassword:         getEnvValue("MYSQL_ROOT_PASSWORD"),
 		InternalRootPassword: getEnvValue("INTERNAL_ROOT_PASSWORD"),
@@ -176,7 +181,7 @@ func NewInitConfig() *Config {
 
 		InitTokuDB: initTokuDB,
 
-		MySQLVersion: mysqlVersion,
+		MySQLVersion: mysqlSemVer,
 
 		AdmitDefeatHearbeatCount: int32(admitDefeatHearbeatCount),
 		ElectionTimeout:          int32(electionTimeout),
@@ -187,23 +192,19 @@ func NewInitConfig() *Config {
 		XCloudS3AccessKey: getEnvValue("S3_ACCESSKEY"),
 		XCloudS3SecretKey: getEnvValue("S3_SECRETKEY"),
 		XCloudS3Bucket:    getEnvValue("S3_BUCKET"),
+
+		ClusterName: getEnvValue("CLUSTER_NAME"),
+		CloneFlag:   false,
+		GtidPurged:  "",
 	}
 }
 
 // NewBackupConfig returns the configuration file needed for backup container.
 func NewBackupConfig() *Config {
-	replicaStr := getEnvValue("REPLICAS")
-	replicas, err := strconv.ParseInt(replicaStr, 10, 32)
-	if err != nil {
-		log.Error(err, "invalid environment values", "REPLICAS", replicaStr)
-		panic(err)
-	}
-
 	return &Config{
 		NameSpace:    getEnvValue("NAMESPACE"),
 		ServiceName:  getEnvValue("SERVICE_NAME"),
-		Replicas:     int32(replicas),
-		ClusterName:  getEnvValue("SERVICE_NAME"),
+		ClusterName:  getEnvValue("CLUSTER_NAME"),
 		RootPassword: getEnvValue("MYSQL_ROOT_PASSWORD"),
 
 		BackupUser:     getEnvValue("BACKUP_USER"),
@@ -218,17 +219,9 @@ func NewBackupConfig() *Config {
 
 // NewReqBackupConfig returns the configuration file needed for backup job.
 func NewReqBackupConfig() *Config {
-	replicaStr := getEnvValue("REPLICAS")
-	replicas, err := strconv.ParseInt(replicaStr, 10, 32)
-	if err != nil {
-		log.Error(err, "invalid environment values", "REPLICAS", replicaStr)
-		panic(err)
-	}
-
 	return &Config{
 		NameSpace:   getEnvValue("NAMESPACE"),
 		ServiceName: getEnvValue("SERVICE_NAME"),
-		Replicas:    int32(replicas),
 
 		BackupUser:     getEnvValue("BACKUP_USER"),
 		BackupPassword: getEnvValue("BACKUP_PASSWORD"),
@@ -304,67 +297,66 @@ func (cfg *Config) buildXenonConf() []byte {
 
 	version := "mysql80"
 	if cfg.MySQLVersion.Major == 5 {
-		if cfg.MySQLVersion.Minor == 6 {
-			version = "mysql56"
-		} else {
-			version = "mysql57"
-		}
+		version = "mysql57"
 	}
 
-	var masterSysVars, slaveSysVars string
+	var srcSysVars, replicaSysVars string
 	if cfg.InitTokuDB {
-		masterSysVars = "tokudb_fsync_log_period=default;sync_binlog=default;innodb_flush_log_at_trx_commit=default"
-		slaveSysVars = "tokudb_fsync_log_period=1000;sync_binlog=1000;innodb_flush_log_at_trx_commit=1"
+		srcSysVars = "tokudb_fsync_log_period=default;sync_binlog=default;innodb_flush_log_at_trx_commit=default"
+		replicaSysVars = "tokudb_fsync_log_period=1000;sync_binlog=1000;innodb_flush_log_at_trx_commit=1"
 	} else {
-		masterSysVars = "sync_binlog=default;innodb_flush_log_at_trx_commit=default"
-		slaveSysVars = "sync_binlog=1000;innodb_flush_log_at_trx_commit=1"
+		srcSysVars = "sync_binlog=default;innodb_flush_log_at_trx_commit=default"
+		replicaSysVars = "sync_binlog=1000;innodb_flush_log_at_trx_commit=1"
 	}
 
 	hostName := fmt.Sprintf("%s.%s.%s", cfg.HostName, cfg.ServiceName, cfg.NameSpace)
 
 	str := fmt.Sprintf(`{
-    "log": {
-        "level": "INFO"
-    },
-    "server": {
-        "endpoint": "%s:%d",
-        "peer-address": "%s:%d",
-        "enable-apis": true
-    },
-    "replication": {
-        "passwd": "%s",
-        "user": "%s"
-    },
-    "rpc": {
-        "request-timeout": %d
-    },
-    "mysql": {
-        "admit-defeat-ping-count": 3,
-        "admin": "root",
-        "ping-timeout": %d,
-        "passwd": "%s",
-        "host": "localhost",
-        "version": "%s",
-        "master-sysvars": "%s",
-        "slave-sysvars": "%s",
-        "port": 3306,
-        "monitor-disabled": true
-    },
-    "raft": {
-        "election-timeout": %d,
-        "admit-defeat-hearbeat-count": %d,
-        "heartbeat-timeout": %d,
-        "meta-datadir": "/var/lib/xenon/",
-        "leader-start-command": "/scripts/leader-start.sh",
-        "leader-stop-command": "/scripts/leader-stop.sh",
-        "semi-sync-degrade": true,
-        "purge-binlog-disabled": true,
-        "super-idle": false
-    }
-}
-`, hostName, utils.XenonPort, hostName, utils.XenonPeerPort, cfg.ReplicationPassword, cfg.ReplicationUser, requestTimeout,
-		pingTimeout, cfg.RootPassword, version, masterSysVars, slaveSysVars, cfg.ElectionTimeout,
+		"log": {
+			"level": "INFO"
+		},
+		"server": {
+			"endpoint": "%s:%d",
+			"peer-address": "%s:%d",
+			"enable-apis": true
+		},
+		"replication": {
+			"passwd": "%s",
+			"user": "%s",
+			"gtid-purged": "%s"
+		},
+		"rpc": {
+			"request-timeout": %d
+		},
+		"mysql": {
+			"admit-defeat-ping-count": 3,
+			"admin": "root",
+			"ping-timeout": %d,
+			"passwd": "%s",
+			"host": "localhost",
+			"version": "%s",
+			"master-sysvars": "%s",
+			"slave-sysvars": "%s",
+			"port": 3306,
+			"monitor-disabled": true
+		},
+		"raft": {
+			"election-timeout": %d,
+			"admit-defeat-hearbeat-count": %d,
+			"heartbeat-timeout": %d,
+			"meta-datadir": "/var/lib/xenon/",
+			"leader-start-command": "/scripts/leader-start.sh",
+			"leader-stop-command": "/scripts/leader-stop.sh",
+			"semi-sync-degrade": true,
+			"purge-binlog-disabled": true,
+			"super-idle": false
+		}
+	}
+	`, hostName, utils.XenonPort, hostName, utils.XenonPeerPort, cfg.ReplicationPassword, cfg.ReplicationUser,
+		cfg.GtidPurged, requestTimeout,
+		pingTimeout, cfg.RootPassword, version, srcSysVars, replicaSysVars, cfg.ElectionTimeout,
 		cfg.AdmitDefeatHearbeatCount, heartbeatTimeout)
+
 	return utils.StringToBytes(str)
 }
 
@@ -416,111 +408,6 @@ func (cfg *Config) buildClientConfig() (*ini.File, error) {
 	return conf, nil
 }
 
-func (cfg *Config) buildPostStart() ([]byte, error) {
-	ordinal, err := utils.GetOrdinal(cfg.HostName)
-	if err != nil {
-		return nil, err
-	}
-
-	nums := ordinal
-	if cfg.existMySQLData {
-		nums = int(cfg.Replicas)
-	}
-
-	host := fmt.Sprintf("%s.%s.%s", cfg.HostName, cfg.ServiceName, cfg.NameSpace)
-
-	str := fmt.Sprintf(`#!/bin/sh
-while true; do
-	info=$(curl -i -X GET -u root:%s http://%s:%d/v1/xenon/ping)
-	code=$(echo $info|grep "HTTP"|awk '{print $2}')
-	if [ "$code" -eq "200" ]; then
-		break
-	fi
-done
-`, cfg.RootPassword, host, utils.XenonPeerPort)
-
-	if !cfg.existMySQLData && ordinal == 0 {
-		str = fmt.Sprintf(`%s
-for i in $(seq 12); do
-	curl -i -X POST -u root:%s http://%s:%d/v1/raft/trytoleader
-	sleep 5
-	curl -i -X GET -u root:%s http://%s:%d/v1/raft/status | grep LEADER
-	if [ $? -eq 0 ] ; then
-		echo "trytoleader success"
-		break
-	fi
-	if [ $i -eq 12 ]; then
-		echo "wait trytoleader failed"
-	fi
-done
-`, str, cfg.RootPassword, host, utils.XenonPeerPort, cfg.RootPassword, host, utils.XenonPeerPort)
-	} else {
-		str = fmt.Sprintf(`%s
-i=0
-while [ $i -lt %d ]; do
-	if [ $i -ne %d ]; then
-		for k in $(seq 12); do
-			res=$(curl -i -X POST -d '{"address": "%s-'$i'.%s.%s:%d"}' -u root:%s http://%s:%d/v1/cluster/add)
-			code=$(echo $res|grep "HTTP"|awk '{print $2}')
-			if [ "$code" -eq "200" ]; then
-				break
-			fi
-		done
-
-		for k in $(seq 12); do
-			res=$(curl -i -X POST -d '{"address": "%s:%d"}' -u root:%s http://%s-$i.%s.%s:%d/v1/cluster/add)
-			code=$(echo $res|grep "HTTP"|awk '{print $2}')
-			if [ "$code" -eq "200" ]; then
-				break
-			fi
-		done
-	fi
-	i=$((i+1))
-done
-`, str, nums, ordinal, cfg.StatefulSetName, cfg.ServiceName, cfg.NameSpace, utils.XenonPort,
-			cfg.RootPassword, host, utils.XenonPeerPort, host, utils.XenonPort, cfg.RootPassword,
-			cfg.StatefulSetName, cfg.ServiceName, cfg.NameSpace, utils.XenonPeerPort)
-	}
-
-	return utils.StringToBytes(str), nil
-}
-
-func (cfg *Config) buildPreStop() []byte {
-	host := fmt.Sprintf("%s.%s.%s", cfg.HostName, cfg.ServiceName, cfg.NameSpace)
-
-	str := fmt.Sprintf(`#!/bin/sh
-while true; do
-	info=$(curl -i -X GET -u root:%s http://%s:%d/v1/xenon/ping)
-	code=$(echo $info|grep "HTTP"|awk '{print $2}')
-	if [ "$code" -eq "200" ]; then
-		break
-	fi
-done
-
-curl -i -X PUT -u root:%s http://%s:%d/v1/raft/disable
-for line in $(curl -X GET -u root:%s http://%s:%d/v1/raft/status | jq -r .nodes[] | cut -d : -f 1)
-do
-	if [ "$line" != "%s" ]; then
-		for i in $(seq 12); do
-			info=$(curl -i -X POST -d '{"address": "%s:%d"}' -u root:%s http://$line:%d/v1/cluster/remove)
-			code=$(echo $info|grep "HTTP"|awk '{print $2}')
-			if [ "$code" -eq "200" ]; then
-				break
-			fi
-			if [ $i -eq 12 ]; then
-				echo "remove node failed"
-				break
-			fi
-			sleep 5
-		done
-	fi
-done
-`, cfg.RootPassword, host, utils.XenonPeerPort, cfg.RootPassword, host, utils.XenonPeerPort, cfg.RootPassword,
-		host, utils.XenonPeerPort, host, host, utils.XenonPort, cfg.RootPassword, utils.XenonPeerPort)
-
-	return utils.StringToBytes(str)
-}
-
 // buildLeaderStart build the leader-start.sh.
 func (cfg *Config) buildLeaderStart() []byte {
 	str := fmt.Sprintf(`#!/usr/bin/env bash
@@ -541,30 +428,12 @@ curl -X PATCH -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/ser
 	return utils.StringToBytes(str)
 }
 
-// build S3 restore shell script
-func (cfg *Config) buildS3Restore(path string) error {
-	if len(cfg.XRestoreFrom) == 0 {
-		return fmt.Errorf("do not have restore from")
-	}
-	if len(cfg.XCloudS3EndPoint) == 0 ||
-		len(cfg.XCloudS3AccessKey) == 0 ||
-		len(cfg.XCloudS3SecretKey) == 0 ||
-		len(cfg.XCloudS3Bucket) == 0 {
-		return fmt.Errorf("do not have S3 information")
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create restore.sh fail : %s", err)
-	}
-	defer func() {
-		f.Close()
-	}()
-
-	restoresh := `#!/bin/sh
+/* The function is equivalent to the following shell script template:
+#!/bin/sh
 if [ ! -d {{.DataDir}} ] ; then
     echo "is not exist the var lib mysql"
-    mkdir {{.DataDir}} 
-    chown -R mysql.mysql {{.DataDir}} 
+    mkdir {{.DataDir}}
+    chown -R mysql.mysql {{.DataDir}}
 fi
 mkdir /root/backup
 xbcloud get --storage=S3 \
@@ -581,24 +450,168 @@ xtrabackup --defaults-file={{.MyCnfMountPath}} --use-memory=3072M --prepare --ta
 chown -R mysql.mysql /root/backup
 xtrabackup --defaults-file={{.MyCnfMountPath}} --datadir={{.DataDir}} --copy-back --target-dir=/root/backup
 chown -R mysql.mysql {{.DataDir}}
-rm -rf /root/backup	
-`
-	template_restore := template.New("restore.sh")
-	template_restore, err = template_restore.Parse(restoresh)
-	if err != nil {
-		return err
+rm -rf /root/backup
+*/
+func (cfg *Config) executeS3Restore(path string) error {
+	if len(cfg.XRestoreFrom) == 0 {
+		return fmt.Errorf("do not have restore from")
 	}
-	err2 := template_restore.Execute(f, struct {
-		Config
-		DataDir        string
-		MyCnfMountPath string
-	}{
-		*cfg,
-		utils.DataVolumeMountPath,
-		utils.ConfVolumeMountPath + "/my.cnf",
-	})
-	if err2 != nil {
-		return err2
+	if len(cfg.XCloudS3EndPoint) == 0 ||
+		len(cfg.XCloudS3AccessKey) == 0 ||
+		len(cfg.XCloudS3SecretKey) == 0 ||
+		len(cfg.XCloudS3Bucket) == 0 {
+		return fmt.Errorf("do not have S3 information")
+	}
+	// Check has directory, and create it.
+	if _, err := os.Stat(utils.DataVolumeMountPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(utils.DataVolumeMountPath, 0755); err != nil {
+			return fmt.Errorf("failed to create data directory : %s", err)
+		}
+	}
+	// mkdir /root/backup.
+	if err := os.MkdirAll("/root/backup", 0755); err != nil {
+		return fmt.Errorf("failed to create backup directory : %s", err)
+	}
+	// Execute xbcloud get.
+	args := []string{
+		"get",
+		"--storage=S3",
+		"--s3-endpoint=" + cfg.XCloudS3EndPoint,
+		"--s3-access-key=" + cfg.XCloudS3AccessKey,
+		"--s3-secret-key=" + cfg.XCloudS3SecretKey,
+		"--s3-bucket=" + cfg.XCloudS3Bucket,
+		"--parallel=10",
+		cfg.XRestoreFrom,
+		"--insecure",
+	}
+	xcloud := exec.Command(xcloudCommand, args...)                    //nolint
+	xbstream := exec.Command("xbstream", "-xv", "-C", "/root/backup") //nolint
+	var err error
+	if xbstream.Stdin, err = xcloud.StdoutPipe(); err != nil {
+		return fmt.Errorf("failed to xbstream and xcloud piped")
+	}
+	xbstream.Stderr = os.Stderr
+	xcloud.Stderr = os.Stderr
+	if err := xcloud.Start(); err != nil {
+		return fmt.Errorf("failed to xcloud start : %s", err)
+	}
+	if err := xbstream.Start(); err != nil {
+		return fmt.Errorf("failed to xbstream start : %s", err)
+	}
+	// Make error channels.
+	errCh := make(chan error, 2)
+	go func() {
+		errCh <- xcloud.Wait()
+	}()
+	go func() {
+		errCh <- xbstream.Wait()
+	}()
+	// Wait for error.
+	for i := 0; i < 2; i++ {
+		if err = <-errCh; err != nil {
+			return err
+		}
+	}
+	// Xtrabackup prepare and apply-log-only.
+	cmd := exec.Command(xtrabackupCommand, "--defaults-file="+utils.ConfVolumeMountPath+"/my.cnf", "--prepare", "--apply-log-only", "--target-dir=/root/backup")
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to xtrabackup prepare and apply-log-only : %s", err)
+	}
+	// Xtrabackup prepare.
+	cmd = exec.Command(xtrabackupCommand, "--defaults-file="+utils.ConfVolumeMountPath+"/my.cnf", "--prepare", "--target-dir=/root/backup")
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to xtrabackup prepare : %s", err)
+	}
+	// Xtrabackup copy-back to /var/lib/mysql.
+	cmd = exec.Command(xtrabackupCommand, "--defaults-file="+utils.ConfVolumeMountPath+"/my.cnf", "--datadir="+utils.DataVolumeMountPath, "--copy-back", "--copy-back", "--target-dir=/root/backup")
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to xtrabackup copy-back : %s", err)
+	}
+	// Execute chown -R mysql.mysql /var/lib/mysql.
+	if err := exec.Command("chown", "-R", "mysql.mysql", utils.DataVolumeMountPath).Run(); err != nil {
+		return fmt.Errorf("failed to chown mysql.mysql %s  : %s", utils.DataVolumeMountPath, err)
+	}
+	// Remove /root/backup.
+	if err := os.RemoveAll("/root/backup"); err != nil {
+		return fmt.Errorf("failed to remove backup directory : %s", err)
 	}
 	return nil
+}
+
+// Do Restore after clone.
+func (cfg *Config) executeCloneRestore() error {
+	// Check directory exist, create if not exist.
+	if _, err := os.Stat(utils.DataVolumeMountPath); os.IsNotExist(err) {
+		os.Mkdir(utils.DataVolumeMountPath, 0755)
+	}
+
+	// Empty the directory.
+	dir, err := ioutil.ReadDir(utils.DataVolumeMountPath)
+	if err != nil {
+		return fmt.Errorf("failed to read datadir %s", err)
+	}
+	for _, d := range dir {
+		os.RemoveAll(path.Join([]string{utils.DataVolumeMountPath, d.Name()}...))
+	}
+	// Xtrabackup prepare and apply-log-only.
+	cmd := exec.Command(xtrabackupCommand, "--defaults-file="+utils.ConfVolumeMountPath+"/my.cnf", "--use-memory=3072M", "--prepare", "--apply-log-only", "--target-dir=/backup/"+cfg.XRestoreFrom)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to xtrabackup prepare apply-log-only : %s", err)
+	}
+	// Xtrabackup Prepare.
+	cmd = exec.Command(xtrabackupCommand, "--defaults-file="+utils.ConfVolumeMountPath+"/my.cnf", "--use-memory=3072M", "--prepare", "--target-dir=/backup/"+cfg.XRestoreFrom)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to xtrabackup prepare : %s", err)
+	}
+	// Get the backup binlong info.
+	gtid, err := GetXtrabackupGTIDPurged("/backup/" + cfg.XRestoreFrom)
+	if err == nil {
+		cfg.GtidPurged = gtid
+	}
+	log.Info("get master gtid purged :", "gtid purged", cfg.GtidPurged)
+	// Xtrabackup copy-back.
+	cmd = exec.Command(xtrabackupCommand, "--defaults-file="+utils.ConfVolumeMountPath+"/my.cnf", "--use-memory=3072M", "--datadir="+utils.DataVolumeMountPath, "--copy-back", "--target-dir=/backup/"+cfg.XRestoreFrom)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to xtrabackup copy-back : %s", err)
+	}
+	// Remove Relaybin.
+	// Because the relaybin is not used in the restore process,
+	// we can remove it to prevent it to be used by salve in the future.
+	cmd = exec.Command("rm", "-rf", utils.DataVolumeMountPath+"mysql-relay*")
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to remove relay-bin : %s", err)
+	}
+	// Run chown -R mysql.mysql /var/lib/mysql
+	cmd = exec.Command("chown", "-R", "mysql.mysql", utils.DataVolumeMountPath)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to chown -R mysql.mysql : %s", err)
+	}
+	log.Info("execute clone restore success")
+	return nil
+}
+
+// Parse the xtrabackup_binlog_info, the format is filename \t position \t gitid1 \ngitid2 ...
+// or filename \t position\n
+// Get the gtid when it is existed, or return empty string.
+// It used to purged the gtid when start the mysqld slave.
+func GetXtrabackupGTIDPurged(backuppath string) (string, error) {
+	byteStream, err := ioutil.ReadFile(fmt.Sprintf("%s/xtrabackup_binlog_info", backuppath))
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSuffix(string(byteStream), "\n")
+	ss := strings.Split(line, "\t")
+	if len(ss) != 3 {
+		return "", fmt.Errorf("info.file.content.invalid[%v]", string(byteStream))
+	}
+	// Replace multi gtidset \n
+	return strings.Replace(ss[2], "\n", "", -1), nil
 }
