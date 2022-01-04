@@ -120,9 +120,7 @@ func (f Framework) createSysbenchPod(ns, name string, args []string) (*corev1.Po
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "mysql.radondb.com",
-			},
+			Namespace: ns,
 		},
 	}
 	container := corev1.Container{
